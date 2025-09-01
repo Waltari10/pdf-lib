@@ -21,6 +21,7 @@ import {
   PDFCatalog,
   PDFContext,
   PDFDict,
+  PDFArray,
   PDFHexString,
   PDFName,
   PDFObjectCopier,
@@ -1287,6 +1288,156 @@ export default class PDFDocument {
         (object instanceof PDFStream && object.dict.get(Type) === MetadataType)
       ) {
         this.context.delete(ref);
+      }
+    }
+  }
+
+  /**
+   * Aggressively strip non-essential objects to reduce file size.
+   * By default removes: attachments, JavaScript, annotations, thumbnails, and outlines.
+   */
+  stripExtras(options?: {
+    attachments?: boolean;
+    javascript?: boolean;
+    annotations?: boolean;
+    thumbnails?: boolean;
+    outlines?: boolean;
+  }): void {
+    const {
+      attachments = true,
+      javascript = true,
+      annotations = true,
+      thumbnails = true,
+      outlines = true,
+    } = options || {};
+
+    const refsToDelete = new Set<string>();
+    const markForDeletion = (ref?: PDFRef) => {
+      if (ref) refsToDelete.add(`${ref.objectNumber} ${ref.generationNumber}`);
+    };
+
+    const Type = PDFName.of('Type');
+    const Filespec = PDFName.of('Filespec');
+    const EmbeddedFile = PDFName.of('EmbeddedFile');
+    const S = PDFName.of('S');
+    const JavaScript = PDFName.of('JavaScript');
+    const Annot = PDFName.of('Annot');
+
+    // Remove Names tree branches and collect their object refs
+    const Names = this.catalog.lookupMaybe(PDFName.of('Names'), PDFDict);
+    if (Names) {
+      if (attachments) {
+        const EFDict = Names.lookupMaybe(PDFName.of('EmbeddedFiles'), PDFDict);
+        if (EFDict) {
+          const EFNames = EFDict.lookupMaybe(PDFName.of('Names'), PDFArray);
+          if (EFNames) {
+            for (let i = 1; i < EFNames.size(); i += 2) {
+              const ref = EFNames.lookupMaybe(i, PDFRef);
+              markForDeletion(ref);
+            }
+          }
+          Names.delete(PDFName.of('EmbeddedFiles'));
+        }
+      }
+      if (javascript) {
+        const JSDict = Names.lookupMaybe(PDFName.of('JavaScript'), PDFDict);
+        if (JSDict) {
+          const JSNames = JSDict.lookupMaybe(PDFName.of('Names'), PDFArray);
+          if (JSNames) {
+            for (let i = 1; i < JSNames.size(); i += 2) {
+              const ref = JSNames.lookupMaybe(i, PDFRef);
+              markForDeletion(ref);
+            }
+          }
+          Names.delete(PDFName.of('JavaScript'));
+        }
+      }
+      // If Names is now empty, remove it from catalog
+      if (Names.keys().length === 0) this.catalog.delete(PDFName.of('Names'));
+    }
+
+    // Remove AF array on catalog (associated files)
+    if (attachments) {
+      const AF = this.catalog.lookupMaybe(PDFName.of('AF'), PDFArray);
+      if (AF) {
+        for (let i = 0; i < AF.size(); i++) {
+          markForDeletion(AF.lookupMaybe(i, PDFRef));
+        }
+        this.catalog.delete(PDFName.of('AF'));
+      }
+    }
+
+    // Remove Outlines entry
+    if (outlines) this.catalog.delete(PDFName.of('Outlines'));
+
+    // Remove page-level extras
+    const pages = this.getPages();
+    for (let p = 0; p < pages.length; p++) {
+      const pageLeaf = pages[p].node;
+      if (annotations) {
+        const annots = pageLeaf.lookupMaybe(PDFName.of('Annots'), PDFArray);
+        if (annots) {
+          for (let i = 0; i < annots.size(); i++) {
+            markForDeletion(annots.lookupMaybe(i, PDFRef));
+          }
+          pageLeaf.delete(PDFName.of('Annots'));
+        }
+      }
+      if (thumbnails) {
+        const thumbRef = pageLeaf.lookupMaybe(PDFName.of('Thumb'), PDFRef);
+        if (thumbRef) {
+          markForDeletion(thumbRef);
+          pageLeaf.delete(PDFName.of('Thumb'));
+        }
+      }
+    }
+
+    // Scan and delete matching objects (streams and dicts)
+    const objects = this.context.enumerateIndirectObjects();
+    for (let idx = 0, len = objects.length; idx < len; idx++) {
+      const [ref, object] = objects[idx];
+      const refKey = `${ref.objectNumber} ${ref.generationNumber}`;
+
+      if (refsToDelete.has(refKey)) {
+        this.context.delete(ref);
+        continue;
+      }
+
+      if (attachments) {
+        if (object instanceof PDFStream) {
+          const t = object.dict.get(Type);
+          if (t === EmbeddedFile) {
+            this.context.delete(ref);
+            continue;
+          }
+        }
+        if (object instanceof PDFDict) {
+          const t = object.get(Type);
+          if (t === Filespec) {
+            this.context.delete(ref);
+            continue;
+          }
+        }
+      }
+
+      if (javascript) {
+        if (object instanceof PDFDict) {
+          const s = object.get(S);
+          if (s === JavaScript) {
+            this.context.delete(ref);
+            continue;
+          }
+        }
+      }
+
+      if (annotations) {
+        if (object instanceof PDFDict) {
+          const t = object.get(Type);
+          if (t === Annot) {
+            this.context.delete(ref);
+            continue;
+          }
+        }
       }
     }
   }
