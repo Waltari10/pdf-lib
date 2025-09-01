@@ -29,6 +29,7 @@ import {
   PDFPageTree,
   PDFParser,
   PDFStreamWriter,
+  PDFStream,
   PDFString,
   PDFWriter,
   PngEmbedder,
@@ -1228,6 +1229,66 @@ export default class PDFDocument {
     this.embeddedPages.push(...embeddedPages);
 
     return embeddedPages;
+  }
+
+  /**
+   * Remove all metadata from this document to reduce file size.
+   *
+   * This deletes:
+   * - Trailer Info dictionary
+   * - Trailer ID
+   * - All `/Metadata` references on any objects (e.g. Catalog, Pages, XObjects)
+   *   and the corresponding metadata stream objects
+   */
+  removeMetadata(): void {
+    // Remove Info dictionary
+    const info = this.context.trailerInfo.Info;
+    if (info instanceof PDFRef) {
+      this.context.delete(info);
+    }
+    this.context.trailerInfo.Info = undefined;
+
+    // Remove trailer ID
+    this.context.trailerInfo.ID = undefined;
+
+    // Remove all /Metadata references and collect streams to delete
+    const Metadata = PDFName.of('Metadata');
+    const Type = PDFName.of('Type');
+    const MetadataType = PDFName.of('Metadata');
+
+    const metadataStreamRefsToDelete = new Set<string>();
+
+    const objects = this.context.enumerateIndirectObjects();
+    for (let idx = 0, len = objects.length; idx < len; idx++) {
+      const [, object] = objects[idx];
+
+      // If a dict has a /Metadata entry, remove it and mark the target for deletion
+      if (object instanceof PDFDict) {
+        const mdValue = object.get(Metadata);
+        if (mdValue) {
+          if (mdValue instanceof PDFRef) {
+            metadataStreamRefsToDelete.add(`${mdValue.objectNumber} ${mdValue.generationNumber}`);
+          }
+          object.delete(Metadata);
+        }
+      }
+    }
+
+    // Second pass: delete any standalone metadata stream objects
+    const allObjects = this.context.enumerateIndirectObjects();
+    for (let idx = 0, len = allObjects.length; idx < len; idx++) {
+      const [ref, object] = allObjects[idx];
+      const refKey = `${ref.objectNumber} ${ref.generationNumber}`;
+
+      // Delete known metadata streams either referenced earlier via /Metadata
+      // or any stream whose Type is /Metadata
+      if (
+        metadataStreamRefsToDelete.has(refKey) ||
+        (object instanceof PDFStream && object.dict.get(Type) === MetadataType)
+      ) {
+        this.context.delete(ref);
+      }
+    }
   }
 
   /**

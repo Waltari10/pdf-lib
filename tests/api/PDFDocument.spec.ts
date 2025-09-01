@@ -14,6 +14,8 @@ import {
   PrintScaling,
   ReadingDirection,
   ViewerPreferences,
+  PDFRawStream,
+  PDFStream,
 } from 'src/index';
 
 const examplePngImage =
@@ -571,6 +573,38 @@ describe(`PDFDocument`, () => {
       expect(pdfDoc.getSubject()).toBe(srcDoc.getSubject());
       expect(pdfDoc.getTitle()).toBe(srcDoc.getTitle());
       expect(pdfDoc.defaultWordBreaks).toEqual(srcDoc.defaultWordBreaks);
+    });
+  });
+
+  describe(`removeMetadata() method`, () => {
+    it(`removes trailer Info/ID and all /Metadata streams`, async () => {
+      const bytes = fs.readFileSync('tests/utils/data/simple.pdf');
+      const pdfDoc = await PDFDocument.load(bytes, { updateMetadata: false });
+
+      // Sanity checks before removal - /Metadata may be a Dict or a Stream
+      expect(
+        pdfDoc.catalog.lookupMaybe(
+          PDFName.of('Metadata'),
+          PDFDict,
+          (PDFRawStream as any) || (PDFStream as any),
+        ),
+      ).toBeDefined();
+
+      pdfDoc.removeMetadata();
+      const saved = await pdfDoc.save();
+
+      const text = Buffer.from(saved).toString('latin1');
+      expect(text.includes('/Metadata')).toBe(false);
+      expect(text.includes('/Info')).toBe(false);
+      expect(text.includes('/ID')).toBe(false);
+
+      const reloaded = await PDFDocument.load(saved, { updateMetadata: false });
+      // Check trailer entries first (calling getters would recreate Info)
+      expect(reloaded.context.trailerInfo.Info).toBeUndefined();
+      expect(reloaded.context.trailerInfo.ID).toBeUndefined();
+      expect(
+        reloaded.catalog.lookupMaybe(PDFName.of('Metadata'), PDFDict, PDFStream),
+      ).toBeUndefined();
     });
   });
 });
